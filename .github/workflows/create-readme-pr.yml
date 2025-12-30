@@ -1,8 +1,10 @@
-name: Create OctoAcme README PR
+name: Create OctoAcme README PR (label or comment trigger)
 
 on:
   issues:
     types: [labeled]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -11,19 +13,58 @@ permissions:
 
 jobs:
   create-readme-pr:
-    if: contains(github.event.label.name, 'create-readme')
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug: show event payload
+        run: |
+          echo "Event name: $GITHUB_EVENT_NAME"
+          echo "Event file: $GITHUB_EVENT_PATH"
+          echo "Event payload excerpt:"
+          jq 'del(.pull_request, .repository.full_name)' "$GITHUB_EVENT_PATH" | sed -n '1,200p' || true
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Determine trigger and should-run
+        id: trigger
+        run: |
+          set -euo pipefail
+          LABEL_OK=false
+          COMMENT_OK=false
+
+          if [ "$GITHUB_EVENT_NAME" = "issues" ]; then
+            LABEL_NAME="$(jq -r .label.name < "$GITHUB_EVENT_PATH" || true)"
+            echo "Label triggered: '$LABEL_NAME'"
+            if [ "$LABEL_NAME" = "create-readme" ]; then
+              LABEL_OK=true
+            fi
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "issue_comment" ]; then
+            COMMENT_BODY="$(jq -r .comment.body < "$GITHUB_EVENT_PATH" || true)"
+            echo "Comment body: '$COMMENT_BODY'"
+            if echo "$COMMENT_BODY" | grep -q -E '^/create-readme\b'; then
+              COMMENT_OK=true
+            fi
+          fi
+
+          echo "label_ok=$LABEL_OK" >> "$GITHUB_OUTPUT"
+          echo "comment_ok=$COMMENT_OK" >> "$GITHUB_OUTPUT"
+
+      - name: Exit if not triggered correctly
+        if: ${{ steps.trigger.outputs.label_ok != 'true' && steps.trigger.outputs.comment_ok != 'true' }}
+        run: |
+          echo "Workflow was triggered by an event that does not match the configured triggers (label 'create-readme' or comment '/create-readme'). Exiting without creating PR."
+          exit 0
+
       - name: Create branch, add README, and push
         env:
           BRANCH: docs/add-octoacme-readme-${{ github.run_id }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
@@ -57,45 +98,56 @@ How to use this file
 EOF
 
           git add docs/octoacme-project-management-readme.md
-          git commit -m "Add OctoAcme project management README (index + process overview)" || echo "No changes to commit"
+          git commit -m "Add OctoAcme project management README (index + process overview)" || (echo "No changes to commit" && exit 0)
           git push origin "$BRANCH"
 
       - name: Create PR and request reviewer
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const { owner, repo } = context.repo;
-            const head = `docs/add-octoacme-readme-${context.runId}`;
-            const base = 'main';
-            const issue_number = context.payload.issue.number;
+            const runId = context.runId;
+            const head = `docs/add-octoacme-readme-${runId}`;
+            const baseResp = await github.rest.repos.get({ owner, repo });
+            const base = baseResp.data.default_branch || 'main';
+            const issue_number = (() => {
+              if (context.eventName === 'issues') return context.payload.issue.number;
+              if (context.eventName === 'issue_comment') return context.payload.issue.number;
+              return null;
+            })();
 
-            // Create PR
-            const pr = await github.rest.pulls.create({
-              owner,
-              repo,
-              title: '[Docs] Add OctoAcme Project Management README — index and process summary',
-              head,
-              base,
-              body: `Adds a central README in docs/ that summarizes OctoAcme's project management approach and links to process docs.\n\nRefs #${issue_number}`
-            });
-
-            // Request reviewer (DhruvTosh)
             try {
-              await github.rest.pulls.requestReviewers({
+              const pr = await github.rest.pulls.create({
                 owner,
                 repo,
-                pull_number: pr.data.number,
-                reviewers: ['DhruvTosh']
+                title: '[Docs] Add OctoAcme Project Management README — index and process summary',
+                head,
+                base,
+                body: `Adds a central README in docs/ that summarizes OctoAcme's project management approach and links to process docs.\n\nRefs #${issue_number || ''}`
               });
-            } catch (err) {
-              core.warning(`Could not request reviewer: ${err}`);
-            }
 
-            // Add PR link as a comment on the originating issue
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number,
-              body: `Automated PR created: ${pr.data.html_url}`
-            });
+              try {
+                await github.rest.pulls.requestReviewers({
+                  owner,
+                  repo,
+                  pull_number: pr.data.number,
+                  reviewers: ['DhruvTosh']
+                });
+              } catch (err) {
+                core.warning(`Could not request reviewer: ${err.message}`);
+              }
+
+              if (issue_number) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number,
+                  body: `Automated PR created: ${pr.data.html_url}`
+                });
+              }
+
+              console.log(`PR created: ${pr.data.html_url}`);
+            } catch (err) {
+              core.setFailed(`Failed to create PR: ${err.message}`);
+            }
