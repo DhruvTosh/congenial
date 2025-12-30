@@ -1,0 +1,101 @@
+name: Create OctoAcme README PR
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  create-readme-pr:
+    if: contains(github.event.label.name, 'create-readme')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create branch, add README, and push
+        env:
+          BRANCH: docs/add-octoacme-readme-${{ github.run_id }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          mkdir -p docs
+          cat > docs/octoacme-project-management-readme.md <<'EOF'
+# OctoAcme Project Management — Overview & Index
+
+This README is the central index for OctoAcme's project management process documents. It provides a concise summary of the way OctoAcme runs projects and links to each process document in this folder so contributors and stakeholders can quickly find procedures, checklists, and role guidance.
+
+OctoAcme runs projects using an iterative, outcome-oriented lifecycle: Initiation, Planning, Execution, Release, and Retrospective. Each project is supported by a small set of core artifacts — a Project One-pager (charter), prioritized backlog and release plan, a risk register, and retrospective action items — that together make ownership, scope, and success metrics explicit. The approach emphasizes delivering small, testable increments, measuring outcomes, and iterating based on evidence.
+
+Key workflows include a light but defined initiation process (one-pager and stakeholder alignment), planning that breaks work into shippable increments with clear acceptance criteria and a Definition of Done, and day-to-day execution on a project board (Backlog → Ready → In Progress → In Review → QA → Done) with disciplined pull request practices and CI validation. Blockers are handled through a three-level escalation path (team → PM → sponsor) to expedite resolution.
+
+Roles and communication are deliberate to reduce ambiguity: Project Managers coordinate delivery, schedules, risks, and status; Product Managers own outcomes, prioritization, and validation; Developers implement and test; QA validates acceptance criteria and release readiness; stakeholders provide input and approvals. Regular cadence includes daily standups for blocking issues, weekly delivery syncs, sprint/milestone demos, and monthly stakeholder updates. Quality assurance requires unit/integration tests, smoke tests for critical flows, CI security scanning, and pre-release checklists including rollback plans — all aimed at predictable, observable releases and continuous improvement.
+
+Process documents in this folder
+- ./octoacme-project-management-overview.md
+- ./octoacme-project-initiation.md
+- ./octoacme-project-planning.md
+- ./octoacme-execution-and-tracking.md
+- ./octoacme-risks-and-communication.md
+- ./octoacme-release-and-deployment.md
+- ./octoacme-retrospective-and-continuous-improvement.md
+- ./octoacme-roles-and-personas.md
+
+How to use this file
+- Link this README from the project root README to make the process docs discoverable.
+- Keep this index updated when adding new process documents.
+- For any doc updates, use the `.github/ISSUE_TEMPLATE/add-update-content-to-process-docs.yml` template to open or reference process doc updates.
+EOF
+
+          git add docs/octoacme-project-management-readme.md
+          git commit -m "Add OctoAcme project management README (index + process overview)" || echo "No changes to commit"
+          git push origin "$BRANCH"
+
+      - name: Create PR and request reviewer
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const head = `docs/add-octoacme-readme-${context.runId}`;
+            const base = 'main';
+            const issue_number = context.payload.issue.number;
+
+            // Create PR
+            const pr = await github.rest.pulls.create({
+              owner,
+              repo,
+              title: '[Docs] Add OctoAcme Project Management README — index and process summary',
+              head,
+              base,
+              body: `Adds a central README in docs/ that summarizes OctoAcme's project management approach and links to process docs.\n\nRefs #${issue_number}`
+            });
+
+            // Request reviewer (DhruvTosh)
+            try {
+              await github.rest.pulls.requestReviewers({
+                owner,
+                repo,
+                pull_number: pr.data.number,
+                reviewers: ['DhruvTosh']
+              });
+            } catch (err) {
+              core.warning(`Could not request reviewer: ${err}`);
+            }
+
+            // Add PR link as a comment on the originating issue
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body: `Automated PR created: ${pr.data.html_url}`
+            });
